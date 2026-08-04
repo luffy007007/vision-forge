@@ -1,0 +1,42 @@
+# Model names, label sets and default settings.
+#
+# Every module keeps its own hardcoded fallbacks, so this file only overrides
+# them — delete it and the app still runs, it just loses the tuning.
+
+clip:
+  model_name: openai/clip-vit-base-patch32
+  default_label_set: general
+  # Zero-shot labels. CLIP always returns a distribution over whatever you
+  # give it, so the set has to span what you actually feed the app: a label
+  # set of landscapes guarantees a landscape answer for a scanned invoice.
+  label_sets:
+    general:
+      - a scanned document
+      - a page of text
+      - a photograph
+      - an object
+      - a city street
+      - a natural landscape
+    landcover:
+      - a forest
+      - a city
+      - a river
+      - farmland
+      - a mountain range
+
+classification:
+  # Below this top-1 probability the app reports uncertainty instead of a class.
+  # The classifier is EuroSAT-only; anything else is out of domain and softmax
+  # still sums to 1, so a confident-looking number means nothing on its own.
+  low_confidence: 0.5
+
+# Defaults for Document / Text Processing mode. Tuned on data/samples/text.jpg
+# (790x575): dark ink on white paper, dilated sideways into text lines.
+document:
+  threshold: otsu
+  thresh: 127
+  invert: true
+  morph_op: dilate
+  kernel_w: 25
+  kernel_h: 3
+  min_area: 15

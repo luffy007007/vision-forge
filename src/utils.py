@@ -1,7 +1,25 @@
 import os
+from functools import lru_cache
+from pathlib import Path
 
 import cv2
 import numpy as np
+import yaml
+
+CONFIG_PATH = Path(__file__).resolve().parents[1] / "config.yaml"
+
+
+@lru_cache(maxsize=1)
+def load_config() -> dict:
+    """Read config.yaml once per process.
+
+    A missing file or a missing key is not an error — every module carries its
+    own defaults, so config.yaml only ever overrides them.
+    """
+    if not CONFIG_PATH.exists():
+        return {}
+    with open(CONFIG_PATH, encoding="utf-8") as f:
+        return yaml.safe_load(f) or {}
 
 
 def load_image(path: str | os.PathLike) -> np.ndarray:

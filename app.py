@@ -9,9 +9,18 @@ import streamlit as st
 from PIL import Image
 
 from src import classification, clip_module, detection, opencv_ops, pipeline, segmentation
+from src.utils import load_config
 
 ROOT = Path(__file__).parent
 SAMPLES = sorted((ROOT / "data" / "samples").glob("*.*"))
+
+CONFIG = load_config()
+DOC_DEFAULTS = CONFIG.get("document", {})
+LOW_CONFIDENCE = CONFIG.get("classification", {}).get("low_confidence", 0.5)
+
+MODE_GENERAL = "General Image"
+MODE_DOCUMENT = "Document / Text Processing"
+MODE_PIPELINE = "Full Pipeline"
 
 MODULES = {
     "OpenCV Processing": opencv_ops,
@@ -64,6 +73,61 @@ def opencv_controls():
         cfg["pre_blur"] = st.sidebar.checkbox("Blur first", True)
     elif op == "contours":
         cfg["min_area"] = st.sidebar.slider("Min area (px)", 0, 5000, 500, step=50)
+    elif op == "text_regions":
+        cfg["min_area"] = st.sidebar.slider("Min area (px)", 0, 2000, 15, step=5)
+
+    # Shared across the operations that binarise first.
+    if op in ("threshold_fixed", "threshold_otsu", "morphology", "contours",
+              "text_regions"):
+        cfg["invert"] = st.sidebar.checkbox(
+            "Invert (dark pixels are the foreground)", op == "text_regions",
+            help="Leave off for a bright subject on a dark background. Turn it "
+                 "on for black text on white paper, or the page itself becomes "
+                 "the object and the text becomes holes in it.")
+    if op in ("morphology", "text_regions"):
+        names = list(opencv_ops.MORPH_OPS)
+        cfg["morph_op"] = st.sidebar.selectbox(
+            "Morphological operation", names, index=names.index("dilate"))
+        cfg["kernel_w"] = st.sidebar.slider("Kernel width", 1, 51, 25)
+        cfg["kernel_h"] = st.sidebar.slider("Kernel height", 1, 51, 3)
+    return cfg
+
+
+def document_controls():
+    """Sidebar for Document / Text Processing. Defaults come from config.yaml."""
+    d = DOC_DEFAULTS
+    methods = ["otsu", "fixed"]
+    cfg = {"threshold": st.sidebar.selectbox(
+        "Threshold method", methods,
+        index=methods.index(d.get("threshold", "otsu")),
+        help="Otsu reads the split point off the histogram — good for an evenly "
+             "lit scan. Fixed uses the number you set.")}
+
+    if cfg["threshold"] == "fixed":
+        cfg["thresh"] = st.sidebar.slider("Threshold value", 0, 255,
+                                          int(d.get("thresh", 127)))
+
+    cfg["invert"] = st.sidebar.checkbox(
+        "Invert threshold", bool(d.get("invert", True)),
+        help="On = dark ink is the foreground. This is the setting a scanned "
+             "page needs; off, and every contour you find is the paper.")
+
+    names = list(opencv_ops.MORPH_OPS)
+    cfg["morph_op"] = st.sidebar.selectbox(
+        "Morphological operation", names,
+        index=names.index(d.get("morph_op", "dilate")),
+        help="dilate grows the ink until neighbouring characters touch. "
+             "erode shrinks it, open drops specks, close fills gaps.")
+    cfg["kernel_w"] = st.sidebar.slider(
+        "Kernel width", 1, 51, int(d.get("kernel_w", 25)),
+        help="Wide and short (25x3) spreads sideways only, so a line of text "
+             "merges into one blob but the lines above and below stay separate.")
+    cfg["kernel_h"] = st.sidebar.slider("Kernel height", 1, 51,
+                                        int(d.get("kernel_h", 3)))
+    cfg["min_area"] = st.sidebar.slider(
+        "Minimum contour area (px)", 0, 2000, int(d.get("min_area", 15)), step=5,
+        help="Drops anything smaller. A single character on this scan is only a "
+             "few dozen pixels, so a large value deletes the whole page.")
     return cfg
 
 
@@ -76,8 +140,10 @@ def task_controls(task, image):
                 "iou": st.sidebar.slider("IoU (NMS)", 0.0, 1.0, 0.45)}
 
     if task == "CLIP Zero-Shot":
+        # defaults live in config.yaml — CLIP can only answer with a label you
+        # give it, so the set has to span what you actually feed the app
         raw = st.sidebar.text_area("Labels (one per line)",
-                                   "a forest\na city\na river\nfarmland\na mountain range")
+                                   "\n".join(clip_module.default_labels()))
         return {"labels": [l.strip() for l in raw.splitlines() if l.strip()]}
 
     if task == "Segmentation":
@@ -121,7 +187,19 @@ def show_result(task, result, image):
 
     data = result.data
     if "predictions" in data:
-        st.subheader(f"Top-1: {data['top1']}")
+        top = data["predictions"][0]
+        st.subheader(f"Top-1: {top['label']} — {top['score']:.1%} confidence")
+        classes = result.meta.get("classes") or []
+        note = ("This classifier was fine-tuned on EuroSAT — "
+                f"{len(classes)} satellite land-use classes"
+                + (f" ({', '.join(classes)})" if classes else "")
+                + ". It has no other options: softmax always sums to 1, so an "
+                  "out-of-domain image such as a scanned document still gets a "
+                  "confident-looking land-use label.")
+        if top["score"] < LOW_CONFIDENCE:
+            st.warning(f"Low confidence — treat this as no answer. {note}")
+        else:
+            st.caption(note)
         show_scores(data["predictions"])
     elif "scores" in data:
         st.subheader(f"Top tag: {data['top']}")
@@ -142,9 +220,58 @@ def show_result(task, result, image):
         st.json(result.meta)
 
 
-#app 
+def show_document(image, config):
+    """Every stage of the document workflow, left to right.
 
-mode = st.sidebar.radio("Mode", ["Single Task", "Full Pipeline"])
+    Two calls into the same dispatch table with the same settings — the middle
+    panel is literally the image the third one ran findContours on.
+    """
+    stage = opencv_ops.run(image, {**config, "operation": "morphology"})
+    result = opencv_ops.run(image, {**config, "operation": "text_regions"})
+    data = result.data
+
+    polarity = "inverted" if config["invert"] else "normal"
+    a, b, c = st.columns(3)
+    a.image(image, caption="1 — input", width="stretch")
+    b.image(stage.overlay, width="stretch",
+            caption=f"2 — {config['threshold']} threshold ({polarity}) "
+                    f"+ {config['morph_op']} {config['kernel_w']}x{config['kernel_h']}")
+    c.image(result.overlay, caption="3 — contours, boxed", width="stretch")
+
+    m1, m2, m3, m4 = st.columns(4)
+    m1.metric("Regions kept", data["regions"])
+    m2.metric("Contours found", data["found"])
+    m3.metric("Threshold used", f"{data['threshold_used']:.0f}")
+    m4.metric("Runtime", f"{result.meta['runtime_s'] + stage.meta['runtime_s']:.3f}s")
+
+    if data["regions"] == 0:
+        st.warning("No regions survived. Either the polarity is wrong for this "
+                   "image, or the minimum area is above every contour.")
+
+    with st.expander("What each step does"):
+        st.markdown(
+            "1. **Grayscale** — colour carries no information about where the "
+            "ink is, and one channel is what `threshold` takes.\n"
+            "2. **Threshold** — split the page into ink and paper. *Otsu* finds "
+            "the split point itself; *fixed* uses your number.\n"
+            "3. **Invert** — decide which side is the foreground. Black text on "
+            "white paper needs the inverted polarity, otherwise the paper is the "
+            "object and the text is a hole in it.\n"
+            "4. **Morphology** — *dilate* with a wide flat kernel grows each "
+            "character sideways until it touches its neighbours, turning a line "
+            "of text into one solid blob.\n"
+            "5. **Contours** — trace the outline of every blob.\n"
+            "6. **Minimum area** — drop the ones too small to be text.")
+
+    with st.expander("Raw output (data)"):
+        st.json(data)
+    with st.expander("meta — settings, runtime"):
+        st.json(result.meta)
+
+
+#app
+
+mode = st.sidebar.radio("Mode", [MODE_GENERAL, MODE_DOCUMENT, MODE_PIPELINE])
 image, image_name = pick_image()
 
 if image is None:
@@ -153,7 +280,15 @@ if image is None:
 
 st.sidebar.divider()
 
-if mode == "Single Task":
+if mode == MODE_DOCUMENT:
+    st.subheader("Document / Text Processing")
+    st.caption("For scans, forms, invoices and pages of text. Classical OpenCV "
+               "only — the models in General Image are trained on photographs "
+               "and satellite tiles, so on a document they answer confidently "
+               "and wrongly.")
+    show_document(image, document_controls())
+
+elif mode == MODE_GENERAL:
     task = st.sidebar.selectbox("Task", list(MODULES))
     config = task_controls(task, image)
 
@@ -172,6 +307,10 @@ if mode == "Single Task":
 
 else:
     st.sidebar.caption("Detection → classification → SAM on the best box → CLIP tags.")
+    st.caption("Every stage is domain-specific: YOLO knows the 80 COCO classes, "
+               "the classifier only EuroSAT land use, CLIP only the labels in "
+               "config.yaml. An out-of-domain input still produces a full report "
+               f"— it just isn't meaningful. For scanned pages use {MODE_DOCUMENT}.")
     if st.sidebar.button("Run pipeline", type="primary", width="stretch"):
         with st.spinner("Running all stages… first call loads three models."):
             st.session_state["pipeline"] = pipeline.run(image, {})

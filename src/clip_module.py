@@ -6,9 +6,20 @@ import time
 import numpy as np
 
 from src.base import CVResult
+from src.utils import load_config
 
 # keyed by name — a single global slot would pin the first checkpoint loaded
 _MODELS: dict[str, tuple] = {}
+
+FALLBACK_LABELS = ["a scanned document", "a page of text", "a photograph",
+                   "an object"]
+
+
+def default_labels() -> list[str]:
+    """The label set config.yaml nominates, or a generic one if it says nothing."""
+    cfg = load_config().get("clip", {})
+    sets = cfg.get("label_sets", {})
+    return sets.get(cfg.get("default_label_set", "general")) or FALLBACK_LABELS
 
 
 def _lazy_load(name: str):
@@ -25,15 +36,18 @@ def run(image: np.ndarray, config: dict) -> CVResult:
     config["labels"] = ["a forest", "a city", "a river", "farmland"]
     Prompt wording matters: "a photo of a {label}" beats a bare label. The
     module wraps labels in that template unless you set config["raw_labels"].
+    Labels and model default to config.yaml.
     """
     import torch
-    name = config.get("model_name", "openai/clip-vit-base-patch32")
+    name = (config.get("model_name")
+            or load_config().get("clip", {}).get("model_name",
+                                                 "openai/clip-vit-base-patch32"))
     model, processor = _lazy_load(name)
 
     # after the load — the first call downloads ~600MB and that isn't inference
     t0 = time.perf_counter()
 
-    labels = config.get("labels", ["a forest", "a city", "a river", "farmland"])
+    labels = config.get("labels") or default_labels()
     if not config.get("raw_labels", False):
         prompts = [f"a photo of {l}" for l in labels]
     else:

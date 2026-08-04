@@ -53,6 +53,8 @@ def run(image: np.ndarray, config: dict) -> CVResult:
             "module": "classification",
             "model": model_name,
             "weights": weights_path,
+            "classes": classes,   # the UI names the domain from this, not a copy
+
             "runtime_s": round(time.perf_counter() - t0, 3),
         },
     )

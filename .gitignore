@@ -10,7 +10,8 @@ __pycache__/
 .ipynb_checkpoints/
 
 # Data, models, run outputs
-data/
+data/*
+!data/samples/
 runs/
 weights/
 *.pt
